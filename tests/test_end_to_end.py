@@ -35,7 +35,7 @@ def test_ten_page_sized_text_and_pdf_persist_refresh_and_trace(tmp_path: Path) -
     trace = StringIO()
     answer = answer_question(restarted, "beta question", trace=trace, model=AnswerModel())
     assert answer.endswith(f"Sources supplied:\n- {pdf_path}, p. 1")
-    for stage in ("model load", "embedding", "Chroma query", "rank=1", "selected context", "system prompt", "provider=ollama", "answer"):
+    for stage in ("model load", "embedding", "Chroma query", "rank=1", "selected context", "full prompt", "provider=ollama", "answer"):
         assert stage in trace.getvalue()
 
     text_path.write_text("Gamma replacement only.", encoding="utf-8")

@@ -104,12 +104,88 @@ def test_searches_all_documents_and_gates_unrelated_results(tmp_path: Path) -> N
     assert unrelated.hits and unrelated.usable == []
 
 
-def test_search_returns_at_most_three_hits(tmp_path: Path) -> None:
+def test_search_considers_more_candidates_than_it_supplies(tmp_path: Path) -> None:
     from open_rag.index import DocumentIndex
 
     index = DocumentIndex(tmp_path / "chroma_db", FixedEmbeddings())
-    for number in range(4):
+    for number in range(13):
         source = tmp_path / f"alpha{number}.txt"
         source.write_text(f"Alpha evidence {number}", encoding="utf-8")
         index.index_file(source)
-    assert len(index.search("alpha question").hits) == 3
+    outcome = index.search("alpha question")
+    assert len(outcome.hits) == 12
+    assert len(outcome.usable) == 3
+    assert outcome.decisions.count("selected") == 3
+    assert len(outcome.decisions) == len(outcome.hits)
+
+
+def test_reingest_upgrades_legacy_chunks_even_when_source_is_unchanged(tmp_path: Path) -> None:
+    from open_rag.documents import load_document
+    from open_rag.index import DocumentIndex
+
+    source = tmp_path / "notes.txt"
+    source.write_text("Alpha evidence", encoding="utf-8")
+    index_path = tmp_path / "chroma_db"
+    index = DocumentIndex(index_path, FixedEmbeddings())
+    index.collection.add(
+        ids=["legacy-id"],
+        documents=["Alpha evidence"],
+        embeddings=[FixedEmbeddings().embed_query("Alpha evidence")],
+        metadatas=[{
+            "source": str(source.resolve()),
+            "filename": source.name,
+            "content_hash": load_document(source).digest,
+            "ordinal": 0,
+        }],
+    )
+
+    assert index.index_file(source) == "indexed"
+    stored = index.collection.get(include=["metadatas"])
+    assert len(stored["ids"]) == 1
+    assert stored["ids"][0] != "legacy-id"
+    assert stored["metadatas"][0]["chunk_format"] == 2
+    assert index.index_file(source) == "unchanged"
+    reopened = DocumentIndex(index_path, FixedEmbeddings())
+    assert reopened.collection.get(include=["metadatas"])["metadatas"][0]["chunk_format"] == 2
+
+
+def test_failed_upgrade_keeps_legacy_chunks(tmp_path: Path) -> None:
+    from open_rag.index import DocumentIndex
+
+    source = tmp_path / "notes.txt"
+    source.write_text("Alpha evidence", encoding="utf-8")
+    index = DocumentIndex(tmp_path / "chroma_db", FixedEmbeddings())
+    index.collection.add(
+        ids=["legacy-id"],
+        documents=["Alpha evidence"],
+        embeddings=[FixedEmbeddings().embed_query("Alpha evidence")],
+        metadatas=[{"source": str(source.resolve()), "filename": source.name, "content_hash": "old", "ordinal": 0}],
+    )
+
+    class FailingEmbeddings:
+        def embed_documents(self, texts):
+            raise RuntimeError("embedding failed")
+
+    index._embeddings = FailingEmbeddings()
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        index.index_file(source)
+    assert index.collection.get()["ids"] == ["legacy-id"]
+
+
+def test_selected_context_respects_budget_without_truncating_passages(tmp_path: Path) -> None:
+    from open_rag.index import DocumentIndex
+    from open_rag.qa import build_context
+
+    source_dir = tmp_path / ("p" * 200)
+    source_dir.mkdir()
+    index = DocumentIndex(tmp_path / "chroma_db", FixedEmbeddings())
+    for number, letter in enumerate("ABC"):
+        source = source_dir / f"evidence-{number}.txt"
+        source.write_text("Alpha " + letter * 480, encoding="utf-8")
+        index.index_file(source)
+
+    outcome = index.search("alpha question")
+    assert len(outcome.usable) < 3
+    assert "context budget" in outcome.decisions
+    assert len(build_context(outcome.usable)) <= 2500
+    assert all(hit.text == Path(hit.source).read_text(encoding="utf-8") for hit in outcome.usable)

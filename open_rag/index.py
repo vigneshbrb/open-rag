@@ -3,6 +3,7 @@
 from hashlib import sha256
 from pathlib import Path
 from dataclasses import dataclass
+import re
 from time import perf_counter
 
 import chromadb
@@ -11,6 +12,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 from .chunking import Chunk, split_document
 from .documents import load_document
+
+
+CHUNK_FORMAT = 2
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,7 @@ class Hit:
 class SearchOutcome:
     hits: list[Hit]
     usable: list[Hit]
+    decisions: list[str]
     load_ms: float
     embed_ms: float
     query_ms: float
@@ -55,7 +60,7 @@ class DocumentIndex:
     @staticmethod
     def _chunk_id(chunk: Chunk) -> str:
         source_id = sha256(chunk.source.encode("utf-8")).hexdigest()
-        return f"{source_id}:{chunk.digest}:{chunk.ordinal}"
+        return f"{source_id}:{chunk.digest}:v{CHUNK_FORMAT}:{chunk.ordinal}"
 
     def index_file(self, path: str | Path) -> str:
         document = load_document(path)
@@ -76,6 +81,7 @@ class DocumentIndex:
                     "source": chunk.source,
                     "filename": chunk.filename,
                     "content_hash": chunk.digest,
+                    "chunk_format": CHUNK_FORMAT,
                     "ordinal": chunk.ordinal,
                 }
                 if chunk.page is not None:
@@ -93,8 +99,9 @@ class DocumentIndex:
             self.collection.delete(ids=stale)
         return "indexed"
 
-    def search(self, question: str, minimum_similarity: float = 0.3) -> SearchOutcome:
-        if self.count() == 0:
+    def search(self, question: str, minimum_similarity: float = 0.2) -> SearchOutcome:
+        count = self.count()
+        if count == 0:
             raise ValueError("No documents indexed. Run `python -m open_rag ingest <paths...>` first.")
         load_start = perf_counter()
         embeddings = self.embeddings
@@ -104,7 +111,7 @@ class DocumentIndex:
             raise ValueError("query embedding must have 384 dimensions")
         embedded = perf_counter()
         result = self.collection.query(
-            query_embeddings=[vector], n_results=3, include=["documents", "metadatas", "distances"]
+            query_embeddings=[vector], n_results=min(12, count), include=["documents", "metadatas", "distances"]
         )
         queried = perf_counter()
         hits = []
@@ -115,9 +122,34 @@ class DocumentIndex:
             hits.append(
                 Hit(id_, text, metadata["source"], metadata["filename"], metadata.get("page"), float(distance), similarity)
             )
+        selected: list[Hit] = []
+        decisions: list[str] = []
+        selected_tokens: list[set[str]] = []
+        context_chars = 0
+        for hit in hits:
+            tokens = set(re.findall(r"\w+", hit.text.casefold()))
+            cost = len(hit.text) + len(hit.source) + 40
+            if hit.similarity < minimum_similarity:
+                decision = "below threshold"
+            elif any(
+                tokens and prior and len(tokens & prior) / len(tokens | prior) >= 0.8
+                for prior in selected_tokens
+            ):
+                decision = "redundant"
+            elif len(selected) == 3:
+                decision = "selection limit"
+            elif context_chars + cost > 2500:
+                decision = "context budget"
+            else:
+                decision = "selected"
+                selected.append(hit)
+                selected_tokens.append(tokens)
+                context_chars += cost
+            decisions.append(decision)
         return SearchOutcome(
             hits,
-            [hit for hit in hits if hit.similarity >= minimum_similarity],
+            selected,
+            decisions,
             (start - load_start) * 1000,
             (embedded - start) * 1000,
             (queried - embedded) * 1000,

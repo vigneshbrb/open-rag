@@ -14,3 +14,11 @@ Live `phi4-mini:latest` check on the TXT and PDF fixture:
 - `Where is Alpha evidence?` returned `Answer: In the text file at [1].` with `notes.txt` and `report.pdf` in `Sources supplied` (both were provided as context).
 - `What year was Alpha evidence written?` retrieved related context but the model returned exactly `I cannot find the answer in the document.`; no source list was printed.
 - `Who wrote Hamlet?` was refused with the same exact text before generation because both retrieved similarities were below 0.3.
+
+## Retrieval calibration for the new change
+
+On 2026-10-08, the local `all-MiniLM-L6-v2` model searched a deterministic fixture containing repeated dashboard text, a PDF recovery passage, and unstructured TXT notes. `How are declined charges handled?` ranked the correct PDF first at cosine similarity 0.216. `Who wrote Hamlet?` peaked at 0.056. `What happened to batch R-417?` ranked the matching TXT passage first at 0.736. The initial 0.3 gate refused the paraphrased question, so the gate is set to 0.2 for this change. It selects the measured paraphrase and still refuses the measured unrelated question. These fixture scores do not prove that 0.2 is safe for every corpus; real user files are still needed for broader calibration.
+
+After the change, the full suite passed: 39 tests. A separate local CLI run ingested `incident.txt`, asked `Who owns the incident?`, and received `Mira.` with a source list. `Who wrote Hamlet?` returned the exact refusal without a source list. After changing the file to name Rohan and running `ingest` again, a new CLI process answered `The incident owner is Rohan.` with the source list and all five trace stages. All five CLI commands exited 0.
+
+On the same macOS arm64 machine, a 50-chunk ten-page-sized TXT fixture was indexed with the local embedding model. After two warm-ups, 12 repeated queries retrieved 12 candidates each. Query embedding plus Chroma search had median 6.8 ms and range 6.6–7.0 ms, below the 200 ms warm retrieval target. Startup, model loading, and answer generation were excluded. This is a local measurement, not a cross-machine guarantee.

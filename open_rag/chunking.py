@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -19,16 +20,19 @@ class Chunk:
 
 
 _splitter = RecursiveCharacterTextSplitter(
-    separators=[""], chunk_size=500, chunk_overlap=50, strip_whitespace=False
+    separators=["\n", ". ", " ", ""], chunk_size=500, chunk_overlap=50
 )
 
 
 def split_document(document: LoadedDocument) -> list[Chunk]:
     chunks: list[Chunk] = []
     for segment in document.segments:
-        for text in _splitter.split_text(segment.text):
-            if text.strip():
-                chunks.append(
-                    Chunk(text, document.source, Path(document.source).name, segment.page, document.digest, len(chunks))
-                )
+        for paragraph in re.split(r"\n\s*\n", segment.text):
+            if not paragraph.strip():
+                continue
+            for text in _splitter.split_text(paragraph.strip()):
+                if text.strip():
+                    chunks.append(
+                        Chunk(text, document.source, Path(document.source).name, segment.page, document.digest, len(chunks))
+                    )
     return chunks
